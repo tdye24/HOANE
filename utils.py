@@ -16,10 +16,10 @@ def get_args():
     parser.add_argument('--no-cuda', action='store_true', default=False, help='Disables CUDA training.')
     parser.add_argument('--seeds', type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], help='Random seed.')
     parser.add_argument('--pretrain-epochs', type=int, default=200, help='Number of epochs to pretrain.')
-    parser.add_argument('--finetune-epochs', type=int, default=400, help='Number of epochs to finetune.')
+    parser.add_argument('--finetune-epochs', type=int, default=200, help='Number of epochs to finetune.')
     parser.add_argument('--pretrain-lr', type=float, default=0.001, help='Initial pretrain learning rate.')
     parser.add_argument('--finetune-lr', type=float, default=0.01, help='Initial finetune learning rate.')
-    parser.add_argument('--finetune-interval', type=int, default=20, help='Interval between two finetune.')
+    parser.add_argument('--finetune-interval', type=int, default=10, help='Interval between two finetune.')
     parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
     parser.add_argument('--dataset', type=str, default='cora', help='type of dataset.')
     parser.add_argument('--noise-dist', type=str, default='Bernoulli',
@@ -33,12 +33,14 @@ def get_args():
     parser.add_argument('--warmup', type=float, default=0,
                         help='Warmup')
     parser.add_argument('--display-step', type=int, default=50, help='Training loss display step.')
+    parser.add_argument('--decoder-type', type=str, default='inner_product', help='Decoder type.')
 
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     args.device = 'cuda' if args.cuda else 'cpu'
 
     return args
+
 
 def load_data(dataset):
     # load the data: x, tx, allx, graph
@@ -256,12 +258,12 @@ def load_data_with_labels(dataset_str):
     if dataset_str == 'citeseer':
         # Fix citeseer dataset (there are some isolated nodes in the graph)
         # Find isolated nodes, add them as zero-vecs into the right position
-        test_idx_range_full = range(min(test_idx_reorder), max(test_idx_reorder)+1)
+        test_idx_range_full = range(min(test_idx_reorder), max(test_idx_reorder) + 1)
         tx_extended = sp.lil_matrix((len(test_idx_range_full), x.shape[1]))
-        tx_extended[test_idx_range-min(test_idx_range), :] = tx
+        tx_extended[test_idx_range - min(test_idx_range), :] = tx
         tx = tx_extended
         ty_extended = np.zeros((len(test_idx_range_full), y.shape[1]))
-        ty_extended[test_idx_range-min(test_idx_range), :] = ty
+        ty_extended[test_idx_range - min(test_idx_range), :] = ty
         ty = ty_extended
 
     features = sp.vstack((allx, tx)).tolil()
@@ -274,7 +276,7 @@ def load_data_with_labels(dataset_str):
 
     idx_test = test_idx_range.tolist()
     idx_train = range(len(y))
-    idx_val = range(len(y), len(y)+500)
+    idx_val = range(len(y), len(y) + 500)
 
     train_mask = sample_mask(idx_train, labels.shape[0])
     val_mask = sample_mask(idx_val, labels.shape[0])
@@ -290,11 +292,10 @@ def load_data_with_labels(dataset_str):
     return adj, features, labels, train_mask, val_mask, test_mask
 
 
-def get_loss(norm, pos_weight, pred, labels, epoch):
-    return -1 * norm * torch.mean(
-        F.binary_cross_entropy_with_logits(input=pred, target=labels, reduction='none', pos_weight=pos_weight), dim=[0, 1])
-    # return -1 * norm * torch.mean(
-    #     torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')(pred, labels), dim=[0, 1])
+def get_rec_loss(norm, pos_weight, pred, labels):
+    return norm * torch.mean(
+        F.binary_cross_entropy_with_logits(input=pred, target=labels, reduction='none', pos_weight=pos_weight),
+        dim=[0, 1])
 
 
 def get_roc_score(edges_pos, edges_neg, emb, adj):
@@ -329,3 +330,9 @@ def accuracy(y_pred, y_true):
     correct = preds.eq(y_true).double()
     correct = correct.sum().item()
     return correct / len(y_true)
+
+
+def classes_num(dataset_str):
+    return {'cora': 7,
+            'citeseer': 6,
+            'pubmed': 3}[dataset_str]

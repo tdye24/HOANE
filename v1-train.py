@@ -4,9 +4,10 @@ import scipy
 import numpy as np
 import scipy.sparse as sp
 from torch import optim
-from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, preprocess_graph, get_loss, \
-    get_roc_score, accuracy
+from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, preprocess_graph, get_rec_loss, \
+    get_roc_score, accuracy, classes_num
 from model import HOANE
+from layers import LogisticRegression
 
 
 def main(args):
@@ -56,8 +57,9 @@ def main(args):
         # bernoulli_dist = dist.Bernoulli(torch.tensor([.5], device=args.device))
 
         # Model hyper-parameters
-        noise_dim_u = [5]
-        noise_dim_a = [5]
+        noise_dim_u = 5
+        noise_dim_a = 5
+        # todo(tdye): GraphMAE中，n_head x z_dim = 128 x 4 = 512
         z_dim = 128
         hidden_u = [128]
         hidden_a = [128]
@@ -67,7 +69,8 @@ def main(args):
         pos_weight = torch.tensor(float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()).to(args.device)
         norm = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
 
-        pos_weight_a = torch.tensor(float(features.shape[0] * features.shape[1] - features_nonzero) / features_nonzero).to(args.device)
+        pos_weight_a = torch.tensor(
+            float(features.shape[0] * features.shape[1] - features_nonzero) / features_nonzero).to(args.device)
         norm_a = features.shape[0] * features.shape[1] / float(
             (features.shape[0] * features.shape[1] - features_nonzero) * 2)
         # pos_weight_a = float(features[2][0] * features[2][1] - len(features[1])) / len(features[1])
@@ -87,12 +90,18 @@ def main(args):
         set_random_seed(seed=seed)
 
         model = HOANE(input_dim=num_features,
+                      output_dim=z_dim,
                       dropout=0.0,
                       device=args.device,
-                      node_noise_dim=5,
-                      attr_noise_dim=5,
+                      node_noise_dim=noise_dim_u,
+                      attr_noise_dim=noise_dim_a,
+                      node_mu_hidden=hidden_u,
+                      node_var_hidden=hidden_u_v,
+                      attr_mu_hidden=hidden_a,
+                      attr_var_hidden=hidden_a_v,
                       K=args.K,
-                      J=args.J)
+                      J=args.J,
+                      decoder_type=args.decoder_type)
 
         # 为不同的module设置不同weight decay
         # params_decay = []
@@ -103,8 +112,12 @@ def main(args):
         # optimizer = optim.Adam([
         #     {'params': params_decay, 'weight_decay': 1e-5}
         # ], lr=args.pretrain_lr)
+
         model.to(args.device)
         optimizer = optim.Adam(params=model.parameters(), lr=args.pretrain_lr)
+        best_outer_val_acc = -1
+        best_outer_epoch = -1
+        best_outer_val_test_acc = -1
         for epoch in range(1, args.pretrain_epochs + 1):
             if tolerance > 100:
                 break
@@ -132,9 +145,10 @@ def main(args):
 
             # node重构loss
             adj_orig_tile = adj_label.unsqueeze(-1).repeat(1, 1, args.K)  # adj matrix
-            log_lik_iw_node = get_loss(norm=norm, pos_weight=pos_weight, pred=reconstruct_node_logits,
-                                       labels=adj_orig_tile, epoch=epoch)
-            # print("Node Rec Loss", torch.mean(log_lik_iw_node).item())
+            log_lik_iw_node = -1 * get_rec_loss(norm=norm,
+                                                pos_weight=pos_weight,
+                                                pred=reconstruct_node_logits,
+                                                labels=adj_orig_tile)
 
             # node_z prior
             node_log_prior_iw_vec = -0.5 * torch.sum(torch.square(node_z_samples_iw), 2)
@@ -142,9 +156,10 @@ def main(args):
 
             # attr重构loss
             features_tile = features.unsqueeze(-1).repeat(1, 1, args.K)  # feature matrix
-            log_lik_iw_attr = get_loss(norm=norm_a, pos_weight=pos_weight_a, pred=reconstruct_attr_logits,
-                                       labels=features_tile, epoch=epoch)
-            # print("Attr Rec Loss", torch.mean(log_lik_iw_attr).item())
+            log_lik_iw_attr = -1 * get_rec_loss(norm=norm_a,
+                                                pos_weight=pos_weight_a,
+                                                pred=reconstruct_attr_logits,
+                                                labels=features_tile)
 
             # attr_z prior
             attr_log_prior_iw_vec = -0.5 * torch.sum(torch.square(attr_z_samples_iw), 2)
@@ -196,20 +211,24 @@ def main(args):
                     else:
                         tolerance += 1
 
-                    print("Epoch:", '%04d' % epoch, "val_ap=", "{:.5f}".format(ap_curr_val))
-                    print("Epoch:", '%04d' % epoch, "val_roc=", "{:.5f}".format(roc_curr_val))
-                    print("Epoch:", '%04d' % epoch, "test_ap=", "{:.5f}".format(ap_curr_test))
-                    print("Epoch:", '%04d' % epoch, "test_roc=", "{:.5f}".format(roc_curr_test))
-                    print('--------------------------------')
+                    # print("Epoch:", '%04d' % epoch, "val_ap=", "{:.5f}".format(ap_curr_val))
+                    # print("Epoch:", '%04d' % epoch, "val_roc=", "{:.5f}".format(roc_curr_val))
+                    # print("Epoch:", '%04d' % epoch, "test_ap=", "{:.5f}".format(ap_curr_test))
+                    # print("Epoch:", '%04d' % epoch, "test_roc=", "{:.5f}".format(roc_curr_test))
+                    # print('--------------------------------')
 
                 # test classification performance
                 if args.node_classification and epoch % args.finetune_interval == 0:
-                    lr_classifier = torch.nn.Linear(in_features=node_mu_iw_vec.shape[1], out_features=7)
-                    finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr, weight_decay=5e-4)
+                    lr_classifier = LogisticRegression(num_dim=node_mu_iw_vec.shape[1],
+                                                       num_class=classes_num(args.dataset)).to(args.device)
+                    finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr,
+                                                    weight_decay=1e-4)
                     criterion = torch.nn.CrossEntropyLoss()
-
-                    lr_classifier.to(args.device)
                     lr_classifier.train()
+
+                    best_inner_val_acc = -1
+                    best_inner_epoch = -1
+                    best_inner_val_test_acc = -1
                     for f_epoch in range(args.finetune_epochs):
                         out = lr_classifier(node_mu_iw_vec)
                         # print(out.shape)
@@ -218,16 +237,25 @@ def main(args):
                         loss.backward()
                         # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
                         finetune_optimizer.step()
+                        if f_epoch % 1 == 0:
+                            with torch.no_grad():
+                                lr_classifier.eval()
+                                pred = lr_classifier(node_mu_iw_vec)
+                                train_acc = accuracy(pred[train_mask], labels[train_mask])
+                                val_acc = accuracy(pred[val_mask], labels[val_mask])
+                                test_acc = accuracy(pred[test_mask], labels[test_mask])
 
-                        with torch.no_grad():
-                            lr_classifier.eval()
-                            pred = lr_classifier(node_mu_iw_vec)
-                            train_acc = accuracy(pred[train_mask], labels[train_mask])
-                            val_acc = accuracy(pred[val_mask], labels[val_mask])
-                            test_acc = accuracy(pred[test_mask], labels[test_mask])
-
-                            print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
-
+                                if val_acc >= best_inner_val_acc:
+                                    best_inner_val_acc = val_acc
+                                    best_inner_epoch = f_epoch
+                                    best_inner_val_test_acc = test_acc
+                                # print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
+                    if best_inner_val_acc > best_outer_val_acc:
+                        best_outer_val_acc = best_inner_val_acc
+                        best_outer_epoch = epoch
+                        best_outer_val_test_acc = best_inner_val_test_acc
+                    print(f"--- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
+                          f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
         print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
         print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
 

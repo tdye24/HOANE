@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as dist
 from layers import GraphConvolution, GCNNModel, GraphConvolutionK, GCNNModelK, DenseModel, \
-    InnerProductDecoderNodeAttribute
+    InnerProduct_Decoder, GAT_Decoder
 
 
 def sample_n(mu, sigma):
@@ -16,6 +16,9 @@ class HOANE(nn.Module):
     """Encode and decode."""
 
     def __init__(self,
+                 node_noise_dim=5,
+                 attr_noise_dim=5,
+                 noise_distribution="bernoulli",
                  num_nodes=2708,
                  input_dim=1433,
                  output_dim=128,
@@ -28,9 +31,7 @@ class HOANE(nn.Module):
                  dropout=0.,
                  K=1,
                  J=1,
-                 noise_distribution="bernoulli",
-                 node_noise_dim=5,
-                 attr_noise_dim=5,
+                 decoder_type='inner_product',
                  device="cpu"):
         super(HOANE, self).__init__()
         self.num_nodes = num_nodes
@@ -80,7 +81,12 @@ class HOANE(nn.Module):
                                        act=torch.tanh)
         self.attr_var_fc = nn.Linear(in_features=attr_var_hidden[-1], out_features=output_dim)
 
-        self.decoder = InnerProductDecoderNodeAttribute(act=lambda x: x)
+        self.decoder_type = decoder_type
+        if decoder_type == 'inner_product':
+            self.decoder = InnerProduct_Decoder(act=lambda x: x)
+        else:
+            assert decoder_type == 'gat'
+            self.decoder = GAT_Decoder(act=lambda x: x)
 
         self.reset_parameters()
 
@@ -180,11 +186,16 @@ class HOANE(nn.Module):
                merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
                node_mu_iw_vec, attr_mu_iw_vec  # node_mu_iw_vec, attr_mu_iw_vec 用于link prediction和attribute inference
 
-    def decode(self, node_z, attr_z):
+    def decode(self, node_z, attr_z, adj):
         for i in range(self.K):
             input_u = node_z[:, i, :].squeeze()
             input_a = attr_z[:, i, :].squeeze()
-            logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a)
+            if self.decoder_type == 'inner_product':
+                logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a)
+            else:
+                assert self.decoder_type == 'gat'
+                logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a, adj=adj)
+
             if i == 0:
                 outputs_u = logits_node.unsqueeze(2)
                 outputs_a = logits_attr.unsqueeze(2)
@@ -200,7 +211,8 @@ class HOANE(nn.Module):
 
         # 重构
         reconstruct_node_logits, reconstruct_attr_logits = self.decode(node_z=node_z_samples_iw,
-                                                                       attr_z=attr_z_samples_iw)
+                                                                       attr_z=attr_z_samples_iw,
+                                                                       adj=adj)
 
         return merged_node_mu, merged_node_sigma, merged_node_z_samples, node_logv_iw, node_z_samples_iw, \
                merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
