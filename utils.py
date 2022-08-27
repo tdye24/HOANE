@@ -13,9 +13,10 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--node-classification', action='store_true', default=False, help='Do node classification.')
+    parser.add_argument('--attr-inference', action='store_true', default=False, help='Do attribute inference.')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='Disables CUDA training.')
     parser.add_argument('--seeds', type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], help='Random seed.')
-    parser.add_argument('--pretrain-epochs', type=int, default=200, help='Number of epochs to pretrain.')
+    parser.add_argument('--pretrain-epochs', type=int, default=500, help='Number of epochs to pretrain.')
     parser.add_argument('--finetune-epochs', type=int, default=200, help='Number of epochs to finetune.')
     parser.add_argument('--pretrain-lr', type=float, default=0.001, help='Initial pretrain learning rate.')
     parser.add_argument('--finetune-lr', type=float, default=0.01, help='Initial finetune learning rate.')
@@ -187,6 +188,53 @@ def mask_test_edges(adj):
     return adj_train, train_edges, val_edges, val_edges_false, test_edges, test_edges_false
 
 
+def mask_test_feas(features):
+    fea_row = features.nonzero()[0]
+    fea_col = features.nonzero()[1]
+    feas = []
+    feas_dic = {}
+    for i in range(len(fea_row)):
+        feas.append([fea_row[i], fea_col[i]])
+        feas_dic[(fea_row[i], fea_col[i])] = 1
+    false_feas_dic = {}
+    num_test = int(np.floor(len(feas) / 10.))
+    num_val = int(np.floor(len(feas) / 20.))
+    all_fea_idx = np.arange(len(feas))
+    np.random.shuffle(all_fea_idx)
+    val_fea_idx = all_fea_idx[:num_val]
+    test_fea_idx = all_fea_idx[num_val:(num_val + num_test)]
+    feas = np.array(feas)
+    test_feas = feas[test_fea_idx]
+    val_feas = feas[val_fea_idx]
+    train_feas = np.delete(feas, np.hstack([test_fea_idx, val_fea_idx]), axis=0)
+    test_feas_false = []
+    val_feas_false = []
+    while len(test_feas_false) < num_test or len(val_feas_false) < num_val:
+        i = np.random.randint(0, features.shape[0])
+        j = np.random.randint(0, features.shape[1])
+        if (i, j) in feas_dic:
+            continue
+        if (i, j) in false_feas_dic:
+            continue
+        else:
+            false_feas_dic[(i, j)] = 1
+        if np.random.random_sample() > 0.333 :
+            if len(test_feas_false) < num_test :
+                test_feas_false.append([i, j])
+            else:
+                if len(val_feas_false) < num_val :
+                    val_feas_false.append([i, j])
+        else:
+            if len(val_feas_false) < num_val :
+                val_feas_false.append([i, j])
+            else:
+                if len(test_feas_false) < num_test :
+                    test_feas_false.append([i, j])
+    data = np.ones(train_feas.shape[0])
+    fea_train = sp.csr_matrix((data, (train_feas[:, 0], train_feas[:, 1])), shape=features.shape)
+    return fea_train, train_feas, val_feas, val_feas_false, test_feas, test_feas_false
+
+
 def preprocess_graph(adj):
     adj = sp.coo_matrix(adj)
     adj_ = adj + sp.eye(adj.shape[0])
@@ -298,7 +346,7 @@ def get_rec_loss(norm, pos_weight, pred, labels):
         dim=[0, 1])
 
 
-def get_roc_score(edges_pos, edges_neg, emb, adj):
+def get_roc_score_node(edges_pos, edges_neg, emb, adj):
     def sigmoid(x):
         return 1 / (1 + np.exp(-x))
 
@@ -315,6 +363,32 @@ def get_roc_score(edges_pos, edges_neg, emb, adj):
     for e in edges_neg:
         preds_neg.append(sigmoid(adj_rec[e[0], e[1]]))
         neg.append(adj[e[0], e[1]])
+
+    preds_all = np.hstack([preds, preds_neg])
+    labels_all = np.hstack([np.ones(len(preds)), np.zeros(len(preds_neg))])
+    roc_score = roc_auc_score(labels_all, preds_all)
+    ap_score = average_precision_score(labels_all, preds_all)
+
+    return roc_score, ap_score
+
+
+def get_roc_score_attr(feas_pos, feas_neg, emb_node, emb_attr, features_orig):
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))
+
+    # Predict on test set of edges
+    fea_rec = np.dot(emb_node, emb_attr.T)
+    preds = []
+    pos = []
+    for e in feas_pos:
+        preds.append(sigmoid(fea_rec[e[0], e[1]]))
+        pos.append(features_orig[e[0], e[1]])
+
+    preds_neg = []
+    neg = []
+    for e in feas_neg:
+        preds_neg.append(sigmoid(fea_rec[e[0], e[1]]))
+        neg.append(features_orig[e[0], e[1]])
 
     preds_all = np.hstack([preds, preds_neg])
     labels_all = np.hstack([np.ones(len(preds)), np.zeros(len(preds_neg))])

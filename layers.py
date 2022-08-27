@@ -256,15 +256,24 @@ class GAT_Decoder(nn.Module):
                            alpha=0.1,
                            nheads=4)
 
-    def forward(self, z_u, z_a, adj):
+    def forward(self, x, adj, z_u, z_a):
+        """
+
+        :param x: 2708 x 1433
+        :param adj: 2708 x 2708
+        :param z_u: 2708 x 128
+        :param z_a: 1433 x 128
+        :return:
+        """
         z_u = F.dropout(z_u, self.dropout, self.training)
         z_u_t = z_u.transpose(0, 1)
         links = torch.matmul(z_u, z_u_t)
         outputs_u = self.act(links)
 
         z_a = F.dropout(z_a, self.dropout, self.training)
-        z_a_t = z_a.transpose(0, 1)
-        weights = F.softmax(torch.matmul(z_u, z_a_t), dim=1)
+        # z_a_t = z_a.transpose(0, 1)
+        # weights = F.softmax(torch.matmul(z_u, z_a_t), dim=1)
+        weights = F.normalize(x + 1e-8, p=1, dim=1)
         fine_grained_features = torch.matmul(weights, z_a)
         concat_features = torch.cat((z_u, fine_grained_features), dim=1)
         outputs_a = self.decoder(concat_features, adj)
@@ -281,6 +290,7 @@ class LogisticRegression(nn.Module):
         logits = self.linear(x)
         return logits
 
+# GAT 层数， dropout， concat
 
 if __name__ == '__main__':
     model = GAT(nfeat=1433, nhid=512, nclass=7, dropout=0., alpha=0.1, nheads=4)

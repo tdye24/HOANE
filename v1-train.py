@@ -4,13 +4,15 @@ import scipy
 import numpy as np
 import scipy.sparse as sp
 from torch import optim
-from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, preprocess_graph, get_rec_loss, \
-    get_roc_score, accuracy, classes_num
+from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, preprocess_graph, get_rec_loss, \
+    get_roc_score_node, get_roc_score_attr, accuracy, classes_num
 from model import HOANE
 from layers import LogisticRegression
 
 
 def main(args):
+    attr_inference = args.attr_inference
+    link_prediction = not attr_inference
     print(f"Using {args.dataset} dataset")
     seeds = args.seeds
     print(f"seeds = {args.seeds}")
@@ -41,7 +43,14 @@ def main(args):
 
         features_orig = features
 
-        adj_train, train_edges, val_edges, val_edges_false, test_edges, test_edges_false = mask_test_edges(adj)
+        if link_prediction:
+            adj_train, train_edges, val_edges, val_edges_false, test_edges, test_edges_false = mask_test_edges(adj)
+            fea_train = features
+        else:
+            assert attr_inference
+            fea_train, train_feas, val_feas, val_feas_false, test_feas, test_feas_false = mask_test_feas(features)
+            adj_train = adj
+
         adj = adj_train
         adj_label = adj_train + sp.eye(adj_train.shape[0])
 
@@ -50,7 +59,7 @@ def main(args):
                                            shape=adj_norm[2]).toarray()
         adj_norm = torch.FloatTensor(adj_norm)
 
-        features = torch.FloatTensor(np.array(features.todense()))
+        features = torch.FloatTensor(np.array(fea_train.todense()))
         features_nonzero = torch.where(features == 1)[0].shape[0]
 
         # Distribution functions
@@ -192,15 +201,38 @@ def main(args):
                     merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
                     reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features,
                                                                                                              adj=adj_norm)
-                    roc_curr_val, ap_curr_val = get_roc_score(edges_pos=val_edges, edges_neg=val_edges_false,
-                                                              emb=node_mu_iw_vec.detach().cpu().numpy(), adj=adj_orig)
-                    # val_roc_score.append(roc_curr)
-                    # print("Val, ROC = {:.5f}".format(roc_curr_val), "AP = {:.5f}".format(ap_curr_val))
+                    if link_prediction:
+                        roc_curr_val, ap_curr_val = get_roc_score_node(emb=node_mu_iw_vec.detach().cpu().numpy(),
+                                                                       edges_pos=val_edges,
+                                                                       edges_neg=val_edges_false,
+                                                                       adj=adj_orig)
+                        # val_roc_score.append(roc_curr)
+                        # print("Val, ROC = {:.5f}".format(roc_curr_val), "AP = {:.5f}".format(ap_curr_val))
 
-                    roc_curr_test, ap_curr_test = get_roc_score(edges_pos=test_edges, edges_neg=test_edges_false,
-                                                                emb=node_mu_iw_vec.detach().cpu().numpy(), adj=adj_orig)
-                    # tst_roc_score.append(roc_currt)
-                    # print("Test, ROC = {:.5f}".format(roc_curr_test), "AP = {:.5f}".format(ap_curr_test))
+                        roc_curr_test, ap_curr_test = get_roc_score_node(emb=node_mu_iw_vec.detach().cpu().numpy(),
+                                                                         edges_pos=test_edges,
+                                                                         edges_neg=test_edges_false,
+                                                                         adj=adj_orig)
+                        # tst_roc_score.append(roc_currt)
+                        # print("Test, ROC = {:.5f}".format(roc_curr_test), "AP = {:.5f}".format(ap_curr_test))
+                    else:
+                        assert attr_inference
+                        roc_curr_val, ap_curr_val = get_roc_score_attr(emb_node=node_mu_iw_vec.detach().cpu().numpy(),
+                                                                                 emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
+                                                                                 feas_pos=val_feas,
+                                                                                 feas_neg=val_feas_false,
+                                                                                 features_orig=features_orig)
+
+                        roc_curr_test, ap_curr_test = get_roc_score_attr(emb_node=node_mu_iw_vec.detach().cpu().numpy(),
+                                                                                   emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
+                                                                                   feas_pos=test_feas,
+                                                                                   feas_neg=test_feas_false,
+                                                                                   features_orig=features_orig)
+                    print("Epoch:", '%04d' % epoch, "val_ap=", "{:.5f}".format(ap_curr_val))
+                    print("Epoch:", '%04d' % epoch, "val_roc=", "{:.5f}".format(roc_curr_val))
+                    print("Epoch:", '%04d' % epoch, "test_ap=", "{:.5f}".format(ap_curr_test))
+                    print("Epoch:", '%04d' % epoch, "test_roc=", "{:.5f}".format(roc_curr_test))
+                    print('--------------------------------')
 
                     if roc_curr_val > best_roc_val and ap_curr_val > best_ap_val:
                         tolerance = 0
@@ -210,12 +242,6 @@ def main(args):
                         best_ap_test = ap_curr_test
                     else:
                         tolerance += 1
-
-                    # print("Epoch:", '%04d' % epoch, "val_ap=", "{:.5f}".format(ap_curr_val))
-                    # print("Epoch:", '%04d' % epoch, "val_roc=", "{:.5f}".format(roc_curr_val))
-                    # print("Epoch:", '%04d' % epoch, "test_ap=", "{:.5f}".format(ap_curr_test))
-                    # print("Epoch:", '%04d' % epoch, "test_roc=", "{:.5f}".format(roc_curr_test))
-                    # print('--------------------------------')
 
                 # test classification performance
                 if args.node_classification and epoch % args.finetune_interval == 0:
@@ -256,6 +282,7 @@ def main(args):
                         best_outer_val_test_acc = best_inner_val_test_acc
                     print(f"--- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
                           f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
+
         print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
         print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
 

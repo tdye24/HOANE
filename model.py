@@ -186,7 +186,7 @@ class HOANE(nn.Module):
                merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
                node_mu_iw_vec, attr_mu_iw_vec  # node_mu_iw_vec, attr_mu_iw_vec 用于link prediction和attribute inference
 
-    def decode(self, node_z, attr_z, adj):
+    def decode(self, node_z, attr_z, x, adj):
         for i in range(self.K):
             input_u = node_z[:, i, :].squeeze()
             input_a = attr_z[:, i, :].squeeze()
@@ -194,7 +194,7 @@ class HOANE(nn.Module):
                 logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a)
             else:
                 assert self.decoder_type == 'gat'
-                logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a, adj=adj)
+                logits_node, logits_attr = self.decoder(x=x, adj=adj, z_u=input_u, z_a=input_a)
 
             if i == 0:
                 outputs_u = logits_node.unsqueeze(2)
@@ -212,6 +212,7 @@ class HOANE(nn.Module):
         # 重构
         reconstruct_node_logits, reconstruct_attr_logits = self.decode(node_z=node_z_samples_iw,
                                                                        attr_z=attr_z_samples_iw,
+                                                                       x=x,
                                                                        adj=adj)
 
         return merged_node_mu, merged_node_sigma, merged_node_z_samples, node_logv_iw, node_z_samples_iw, \
