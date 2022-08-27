@@ -18,6 +18,7 @@ def main(args):
     print(f"seeds = {args.seeds}")
     test_roc_over_runs = []
     test_ap_over_runs = []
+    test_acc_over_runs = []
     for i, seed in enumerate(seeds):
         print(f"########## Run {i} for seed {seed} ##########")
         set_random_seed(seed=seed)
@@ -245,6 +246,10 @@ def main(args):
 
                 # test classification performance
                 if args.node_classification and epoch % args.finetune_interval == 0:
+
+                    # graph_mae_embedding = np.load('./embedding.npy')
+                    # node_mu_iw_vec = torch.tensor(graph_mae_embedding).to(args.device)
+
                     lr_classifier = LogisticRegression(num_dim=node_mu_iw_vec.shape[1],
                                                        num_class=classes_num(args.dataset)).to(args.device)
                     finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr,
@@ -271,7 +276,7 @@ def main(args):
                                 val_acc = accuracy(pred[val_mask], labels[val_mask])
                                 test_acc = accuracy(pred[test_mask], labels[test_mask])
 
-                                if val_acc >= best_inner_val_acc:
+                                if val_acc > best_inner_val_acc:
                                     best_inner_val_acc = val_acc
                                     best_inner_epoch = f_epoch
                                     best_inner_val_test_acc = test_acc
@@ -285,14 +290,18 @@ def main(args):
 
         print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
         print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
-
+        print("Node classification, val_acc", '{:.5f}'.format(best_outer_val_acc), "test_acc", '{:.5f}'.format(best_outer_val_test_acc))
         test_roc_over_runs.append(best_roc_test)
         test_ap_over_runs.append(best_ap_test)
+        test_acc_over_runs.append(best_outer_val_test_acc)
 
     print("Test ROC", test_roc_over_runs)
     print("Test AP", test_ap_over_runs)
+    print("Node classification, test accuracy", test_acc_over_runs)
     print("ROC: {:.5f}".format(np.mean(test_roc_over_runs)), "+-", "{:.5f}".format(np.std(test_roc_over_runs)))
     print("AP: {:.5f}".format(np.mean(test_ap_over_runs)), "+-", "{:.5f}".format(np.std(test_ap_over_runs)))
+    print("Node classification, test accuracy: {:.5f}".format(np.mean(test_acc_over_runs)), "+-", "{:.5f}".format(np.std(test_acc_over_runs)))
+
 
 
 if __name__ == '__main__':

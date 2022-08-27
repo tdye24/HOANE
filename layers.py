@@ -222,20 +222,48 @@ class GraphAttentionLayer(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, nfeat, nhid, nclass, dropout, alpha, nheads):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout, alpha, heads):
         """Dense version of GAT."""
         super(GAT, self).__init__()
         self.dropout = dropout
-
-        self.attentions = [GraphAttentionLayer(nfeat, nhid, dropout=dropout, alpha=alpha, concat=True) for _ in range(nheads)]
-        for i, attention in enumerate(self.attentions):
-            self.add_module('attention_{}'.format(i), attention)
-
-        self.out_att = GraphAttentionLayer(nhid * nheads, nclass, dropout=dropout, alpha=alpha, concat=False)
+        self.num_layers = num_layers
+        self.heads = heads
+        self.gat_layers = []
+        if num_layers == 1:
+            # 一层GAT
+            self.out_att = GraphAttentionLayer(in_features=input_dim,
+                                               out_features=output_dim,
+                                               dropout=dropout,
+                                               alpha=alpha,
+                                               concat=False)
+        else:
+            # input projection (no residual)
+            self.gat_layers.extend(
+                [GraphAttentionLayer(in_features=input_dim,
+                                     out_features=hidden_dim,
+                                     dropout=dropout,
+                                     alpha=alpha,
+                                     concat=True) for _ in range(heads)]
+            )
+            for i in range(1, num_layers-1):
+                self.gat_layers.extend(
+                    [GraphAttentionLayer(in_features=hidden_dim * heads,
+                                         out_features=hidden_dim,
+                                         dropout=dropout,
+                                         alpha=alpha,
+                                         concat=True) for _ in range(heads)]
+                )
+            self.gat_layers = nn.ModuleList(self.gat_layers)
+            self.out_att = GraphAttentionLayer(in_features=hidden_dim * heads,
+                                               out_features=output_dim,
+                                               dropout=dropout,
+                                               alpha=alpha,
+                                               concat=False)
 
     def forward(self, x, adj):
-        x = F.dropout(x, self.dropout, training=self.training)
-        x = torch.cat([att(x, adj) for att in self.attentions], dim=1)
+        for i in range(0, self.num_layers-1):
+            x = F.dropout(x, self.dropout, training=self.training)
+            x = torch.cat([att(x, adj) for att in self.gat_layers[i*self.heads: (i+1)*self.heads]], dim=1)
         x = F.dropout(x, self.dropout, training=self.training)
         return self.out_att(x, adj)
         # x = F.elu(self.out_att(x, adj))
@@ -245,16 +273,17 @@ class GAT(nn.Module):
 class GAT_Decoder(nn.Module):
     """GAT decoder layer for link prediction and attribute inference."""
 
-    def __init__(self, dropout=0., act=torch.sigmoid):
+    def __init__(self, dropout=0., act=torch.sigmoid, num_layers=1):
         super(GAT_Decoder, self).__init__()
         self.dropout = dropout
         self.act = act  # self.dropout_layer = nn.Dropout(p=dropout)
-        self.decoder = GAT(nfeat=256,
-                           nhid=512,
-                           nclass=1433,
+        self.decoder = GAT(input_dim=256,
+                           hidden_dim=512,
+                           output_dim=1433,
+                           num_layers=num_layers,
                            dropout=0.,
                            alpha=0.1,
-                           nheads=4)
+                           heads=4)
 
     def forward(self, x, adj, z_u, z_a):
         """
@@ -273,9 +302,11 @@ class GAT_Decoder(nn.Module):
         z_a = F.dropout(z_a, self.dropout, self.training)
         # z_a_t = z_a.transpose(0, 1)
         # weights = F.softmax(torch.matmul(z_u, z_a_t), dim=1)
-        weights = F.normalize(x + 1e-8, p=1, dim=1)
+        # weights = F.normalize(x + 1e-8, p=1, dim=1)
+        weights = F.normalize(x, p=1, dim=1)  # torch.nn.functional.normalize(input, p=2, dim=1, eps=1e-12, out=None)
         fine_grained_features = torch.matmul(weights, z_a)
         concat_features = torch.cat((z_u, fine_grained_features), dim=1)
+        # concat_features = z_u + fine_grained_features
         outputs_a = self.decoder(concat_features, adj)
         outputs_a = self.act(outputs_a)
         return outputs_u, outputs_a

@@ -86,7 +86,7 @@ class HOANE(nn.Module):
             self.decoder = InnerProduct_Decoder(act=lambda x: x)
         else:
             assert decoder_type == 'gat'
-            self.decoder = GAT_Decoder(act=lambda x: x)
+            self.decoder = GAT_Decoder(num_layers=1, act=lambda x: x)
 
         self.reset_parameters()
 
