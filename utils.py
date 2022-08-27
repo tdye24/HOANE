@@ -35,6 +35,8 @@ def get_args():
                         help='Warmup')
     parser.add_argument('--display-step', type=int, default=50, help='Training loss display step.')
     parser.add_argument('--decoder-type', type=str, default='inner_product', help='Decoder type.')
+    parser.add_argument('--node-loss-type', type=str, default='bce_loss', help='Node loss type.')
+    parser.add_argument('--attr-loss-type', type=str, default='bce_loss', help='Attr loss type.')
 
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -340,10 +342,46 @@ def load_data_with_labels(dataset_str):
     return adj, features, labels, train_mask, val_mask, test_mask
 
 
-def get_rec_loss(norm, pos_weight, pred, labels):
-    return norm * torch.mean(
-        F.binary_cross_entropy_with_logits(input=pred, target=labels, reduction='none', pos_weight=pos_weight),
-        dim=[0, 1])
+def get_rec_loss(norm, pos_weight, pred, labels, loss_type='bce_loss'):
+    if loss_type == 'bce_loss':
+        return norm * torch.mean(
+            F.binary_cross_entropy_with_logits(input=pred, target=labels, reduction='none', pos_weight=pos_weight),
+            dim=[0, 1])
+    elif loss_type == 'sce_loss':
+        return norm * sce_loss(pred, labels)
+    elif loss_type == 'mse_loss':
+        return norm * torch.mean(
+            F.mse_loss(input=pred, target=labels, reduction='none'),
+            dim=[0, 1]
+        )
+    else:
+        assert loss_type == 'sig_loss'
+        return norm * sig_loss(pred, labels)
+
+
+def sce_loss(x, y, alpha=3):
+    x = F.normalize(x, p=2, dim=-1)
+    y = F.normalize(y, p=2, dim=-1)
+
+    # loss =  - (x * y).sum(dim=-1)
+    # loss = (x_h - y_h).norm(dim=1).pow(alpha)
+
+    loss = (1 - (x * y).sum(dim=-1)).pow_(alpha)
+
+    # loss = loss.mean()
+    loss = torch.mean(loss, dim=[0, 1])
+    return loss
+
+
+def sig_loss(x, y):
+    x = F.normalize(x, p=2, dim=-1)
+    y = F.normalize(y, p=2, dim=-1)
+
+    loss = (x * y).sum(1)
+    loss = torch.sigmoid(-loss)
+    # loss = loss.mean()
+    loss = torch.mean(loss, dim=[0, 1])
+    return loss
 
 
 def get_roc_score_node(edges_pos, edges_neg, emb, adj):

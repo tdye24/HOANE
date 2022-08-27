@@ -158,7 +158,8 @@ def main(args):
             log_lik_iw_node = -1 * get_rec_loss(norm=norm,
                                                 pos_weight=pos_weight,
                                                 pred=reconstruct_node_logits,
-                                                labels=adj_orig_tile)
+                                                labels=adj_orig_tile,
+                                                loss_type=args.node_loss_type)
 
             # node_z prior
             node_log_prior_iw_vec = -0.5 * torch.sum(torch.square(node_z_samples_iw), 2)
@@ -169,7 +170,8 @@ def main(args):
             log_lik_iw_attr = -1 * get_rec_loss(norm=norm_a,
                                                 pos_weight=pos_weight_a,
                                                 pred=reconstruct_attr_logits,
-                                                labels=features_tile)
+                                                labels=features_tile,
+                                                loss_type=args.attr_loss_type)
 
             # attr_z prior
             attr_log_prior_iw_vec = -0.5 * torch.sum(torch.square(attr_z_samples_iw), 2)
