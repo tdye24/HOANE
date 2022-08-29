@@ -4,7 +4,8 @@ import scipy
 import numpy as np
 import scipy.sparse as sp
 from torch import optim
-from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, preprocess_graph, get_rec_loss, \
+from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, preprocess_graph, \
+    get_rec_loss, \
     get_roc_score_node, get_roc_score_attr, accuracy, classes_num
 from model import HOANE
 from layers import LogisticRegression
@@ -12,7 +13,9 @@ from layers import LogisticRegression
 
 def main(args):
     attr_inference = args.attr_inference
-    link_prediction = not attr_inference
+    link_prediction = args.link_prediction
+    node_classification = args.node_classification
+    assert attr_inference ** 2 + link_prediction ** 2 + node_classification ** 2 == 1
     print(f"Using {args.dataset} dataset")
     seeds = args.seeds
     print(f"seeds = {args.seeds}")
@@ -47,9 +50,12 @@ def main(args):
         if link_prediction:
             adj_train, train_edges, val_edges, val_edges_false, test_edges, test_edges_false = mask_test_edges(adj)
             fea_train = features
-        else:
-            assert attr_inference
+        elif attr_inference:
             fea_train, train_feas, val_feas, val_feas_false, test_feas, test_feas_false = mask_test_feas(features)
+            adj_train = adj
+        else:
+            assert args.node_classification
+            fea_train = features
             adj_train = adj
 
         adj = adj_train
@@ -70,7 +76,7 @@ def main(args):
         noise_dim_u = 5
         noise_dim_a = 5
         # todo(tdye): GraphMAE中，n_head x z_dim = 128 x 4 = 512
-        z_dim = 128
+        z_dim = 512
         hidden_u = [128]
         hidden_a = [128]
         hidden_u_v = [128]
@@ -204,6 +210,7 @@ def main(args):
                     merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
                     reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features,
                                                                                                              adj=adj_norm)
+                if link_prediction or attr_inference:
                     if link_prediction:
                         roc_curr_val, ap_curr_val = get_roc_score_node(emb=node_mu_iw_vec.detach().cpu().numpy(),
                                                                        edges_pos=val_edges,
@@ -218,19 +225,20 @@ def main(args):
                                                                          adj=adj_orig)
                         # tst_roc_score.append(roc_currt)
                         # print("Test, ROC = {:.5f}".format(roc_curr_test), "AP = {:.5f}".format(ap_curr_test))
-                    else:
-                        assert attr_inference
-                        roc_curr_val, ap_curr_val = get_roc_score_attr(emb_node=node_mu_iw_vec.detach().cpu().numpy(),
-                                                                                 emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
-                                                                                 feas_pos=val_feas,
-                                                                                 feas_neg=val_feas_false,
-                                                                                 features_orig=features_orig)
+                    elif attr_inference:
+                        roc_curr_val, ap_curr_val = get_roc_score_attr(
+                            emb_node=node_mu_iw_vec.detach().cpu().numpy(),
+                            emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
+                            feas_pos=val_feas,
+                            feas_neg=val_feas_false,
+                            features_orig=features_orig)
 
-                        roc_curr_test, ap_curr_test = get_roc_score_attr(emb_node=node_mu_iw_vec.detach().cpu().numpy(),
-                                                                                   emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
-                                                                                   feas_pos=test_feas,
-                                                                                   feas_neg=test_feas_false,
-                                                                                   features_orig=features_orig)
+                        roc_curr_test, ap_curr_test = get_roc_score_attr(
+                            emb_node=node_mu_iw_vec.detach().cpu().numpy(),
+                            emb_attr=attr_mu_iw_vec.detach().cpu().numpy(),
+                            feas_pos=test_feas,
+                            feas_neg=test_feas_false,
+                            features_orig=features_orig)
                     print("Epoch:", '%04d' % epoch, "val_ap=", "{:.5f}".format(ap_curr_val))
                     print("Epoch:", '%04d' % epoch, "val_roc=", "{:.5f}".format(roc_curr_val))
                     print("Epoch:", '%04d' % epoch, "test_ap=", "{:.5f}".format(ap_curr_test))
@@ -287,23 +295,27 @@ def main(args):
                         best_outer_val_acc = best_inner_val_acc
                         best_outer_epoch = epoch
                         best_outer_val_test_acc = best_inner_val_test_acc
-                    print(f"--- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
+                    print(f"Pretrain epoch {epoch} --- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
                           f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
+        if link_prediction or attr_inference:
+            print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
+            print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
+            test_roc_over_runs.append(best_roc_test)
+            test_ap_over_runs.append(best_ap_test)
+        if node_classification:
+            print("Node classification, val_acc", '{:.5f}'.format(best_outer_val_acc), "test_acc",
+                  '{:.5f}'.format(best_outer_val_test_acc))
 
-        print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
-        print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
-        print("Node classification, val_acc", '{:.5f}'.format(best_outer_val_acc), "test_acc", '{:.5f}'.format(best_outer_val_test_acc))
-        test_roc_over_runs.append(best_roc_test)
-        test_ap_over_runs.append(best_ap_test)
-        test_acc_over_runs.append(best_outer_val_test_acc)
-
-    print("Test ROC", test_roc_over_runs)
-    print("Test AP", test_ap_over_runs)
-    print("Node classification, test accuracy", test_acc_over_runs)
-    print("ROC: {:.5f}".format(np.mean(test_roc_over_runs)), "+-", "{:.5f}".format(np.std(test_roc_over_runs)))
-    print("AP: {:.5f}".format(np.mean(test_ap_over_runs)), "+-", "{:.5f}".format(np.std(test_ap_over_runs)))
-    print("Node classification, test accuracy: {:.5f}".format(np.mean(test_acc_over_runs)), "+-", "{:.5f}".format(np.std(test_acc_over_runs)))
-
+            test_acc_over_runs.append(best_outer_val_test_acc)
+    if link_prediction or attr_inference:
+        print("Test ROC", test_roc_over_runs)
+        print("Test AP", test_ap_over_runs)
+        print("ROC: {:.5f}".format(np.mean(test_roc_over_runs)), "+-", "{:.5f}".format(np.std(test_roc_over_runs)))
+        print("AP: {:.5f}".format(np.mean(test_ap_over_runs)), "+-", "{:.5f}".format(np.std(test_ap_over_runs)))
+    if node_classification:
+        print("Node classification, test accuracy", test_acc_over_runs)
+        print("Node classification, test accuracy: {:.5f}".format(np.mean(test_acc_over_runs)), "+-",
+              "{:.5f}".format(np.std(test_acc_over_runs)))
 
 
 if __name__ == '__main__':
