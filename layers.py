@@ -312,6 +312,41 @@ class GAT_Decoder(nn.Module):
         return outputs_u, outputs_a
 
 
+class MLP_Decoder(nn.Module):
+    """MLP decoder layer for link prediction and attribute inference."""
+
+    def __init__(self, dropout=0., act=torch.sigmoid, num_layers=1):
+        super(MLP_Decoder, self).__init__()
+        self.dropout = dropout
+        self.act = act  # self.dropout_layer = nn.Dropout(p=dropout)
+        self.decoder = nn.Linear(in_features=1024, out_features=1433)
+
+    def forward(self, x, z_u, z_a):
+        """
+
+        :param x: 2708 x 1433
+        :param z_u: 2708 x 128
+        :param z_a: 1433 x 128
+        :return:
+        """
+        z_u = F.dropout(z_u, self.dropout, self.training)
+        z_u_t = z_u.transpose(0, 1)
+        links = torch.matmul(z_u, z_u_t)
+        outputs_u = self.act(links)
+
+        z_a = F.dropout(z_a, self.dropout, self.training)
+        # z_a_t = z_a.transpose(0, 1)
+        # weights = F.softmax(torch.matmul(z_u, z_a_t), dim=1)
+        # weights = F.normalize(x + 1e-8, p=1, dim=1)
+        weights = F.normalize(x, p=1, dim=1)  # torch.nn.functional.normalize(input, p=2, dim=1, eps=1e-12, out=None)
+        fine_grained_features = torch.matmul(weights, z_a)
+        concat_features = torch.cat((z_u, fine_grained_features), dim=1)
+        # concat_features = z_u + fine_grained_features
+        outputs_a = self.decoder(concat_features)
+        outputs_a = self.act(outputs_a)
+        return outputs_u, outputs_a
+
+
 class LogisticRegression(nn.Module):
     def __init__(self, num_dim, num_class):
         super().__init__()

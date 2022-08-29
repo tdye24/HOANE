@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as dist
-from layers import GraphConvolution, GCNNModel, GraphConvolutionK, GCNNModelK, DenseModel, \
-    InnerProduct_Decoder, GAT_Decoder
+from layers import GraphConvolution, GCNNModel, GraphConvolutionK, GCNNModelK, DenseModel
+from layers import InnerProduct_Decoder, GAT_Decoder, MLP_Decoder
 
 
 def sample_n(mu, sigma):
@@ -84,6 +84,8 @@ class HOANE(nn.Module):
         self.decoder_type = decoder_type
         if decoder_type == 'inner_product':
             self.decoder = InnerProduct_Decoder(act=lambda x: x)
+        elif decoder_type == 'mlp':
+            self.decoder = MLP_Decoder(act=lambda x: x)
         else:
             assert decoder_type == 'gat'
             self.decoder = GAT_Decoder(num_layers=1, act=lambda x: x)
@@ -192,6 +194,8 @@ class HOANE(nn.Module):
             input_a = attr_z[:, i, :].squeeze()
             if self.decoder_type == 'inner_product':
                 logits_node, logits_attr = self.decoder(z_u=input_u, z_a=input_a)
+            elif self.decoder_type == 'mlp':
+                logits_node, logits_attr = self.decoder(x=x, z_u=input_u, z_a=input_a)
             else:
                 assert self.decoder_type == 'gat'
                 logits_node, logits_attr = self.decoder(x=x, adj=adj, z_u=input_u, z_a=input_a)
