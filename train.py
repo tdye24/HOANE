@@ -4,11 +4,22 @@ import scipy
 import numpy as np
 import scipy.sparse as sp
 from torch import optim
-from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, preprocess_graph, \
+from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, \
     get_rec_loss, \
-    get_roc_score_node, get_roc_score_attr, accuracy, classes_num
-from model import HOANE
+    get_roc_score_node, get_roc_score_attr, accuracy, classes_num, prepare_inputs
+from utils import adj_augment, attr_augment
+from model import HOANE, HOANE_V2
 from layers import LogisticRegression
+
+# Model hyper-parameters
+noise_dim_u = 5
+noise_dim_a = 5
+# todo(tdye): GraphMAE中，n_head x z_dim = 128 x 4 = 512
+z_dim = 512
+hidden_u = [128]
+hidden_a = [128]
+hidden_u_v = [128]
+hidden_a_v = [128]
 
 
 def main(args):
@@ -30,7 +41,7 @@ def main(args):
         # print(f"adj.shape = {adj.shape}")
         # print(f"features.shape = {features.shape}")
         # print(f"labels.shape = {labels.shape}")
-
+        #
         # print("Train mask: ")
         # print(np.where(train_mask == 1)[0].tolist())
         # print("Val mask: ")
@@ -58,42 +69,10 @@ def main(args):
             fea_train = features
             adj_train = adj
 
-        adj = adj_train
-        adj_label = adj_train + sp.eye(adj_train.shape[0])
+        # following for test, no edges or attr augmentation
+        adj_norm_test, pos_weight_test, norm_test, features_test, pos_weight_a_test, norm_a_test = prepare_inputs(adj=adj_train, features=fea_train, args=args)
 
-        adj_norm = preprocess_graph(adj)
-        adj_norm = scipy.sparse.coo_matrix((adj_norm[1], (adj_norm[0][:, 0], adj_norm[0][:, 1])),
-                                           shape=adj_norm[2]).toarray()
-        adj_norm = torch.FloatTensor(adj_norm)
-
-        features = torch.FloatTensor(np.array(fea_train.todense()))
-        features_nonzero = torch.where(features == 1)[0].shape[0]
-
-        # Distribution functions
-        # bernoulli_dist = dist.Bernoulli(torch.tensor([.5], device=args.device))
-
-        # Model hyper-parameters
-        noise_dim_u = 5
-        noise_dim_a = 5
-        # todo(tdye): GraphMAE中，n_head x z_dim = 128 x 4 = 512
-        z_dim = 512
-        hidden_u = [128]
-        hidden_a = [128]
-        hidden_u_v = [128]
-        hidden_a_v = [128]
-
-        pos_weight = torch.tensor(float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()).to(args.device)
-        norm = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
-
-        pos_weight_a = torch.tensor(
-            float(features.shape[0] * features.shape[1] - features_nonzero) / features_nonzero).to(args.device)
-        norm_a = features.shape[0] * features.shape[1] / float(
-            (features.shape[0] * features.shape[1] - features_nonzero) * 2)
-        # pos_weight_a = float(features[2][0] * features[2][1] - len(features[1])) / len(features[1])
-        # norm_a = features[2][0] * features[2][1] / float((features[2][0] * features[2][1] - len(features[1])) * 2)
-
-        features = features.to(args.device)
-        adj_norm = adj_norm.to(args.device)
+        adj_label = adj_train + sp.eye(adj_train.shape[0])  # 自环-边，计算重构loss时，需要用到节点与自己的边
         adj_label = torch.FloatTensor(adj_label.toarray()).to(args.device)
         labels = torch.argmax(torch.tensor(labels), dim=1).to(args.device)
 
@@ -105,29 +84,37 @@ def main(args):
 
         set_random_seed(seed=seed)
 
-        model = HOANE(input_dim=num_features,
-                      output_dim=z_dim,
-                      dropout=0.0,
-                      device=args.device,
-                      node_noise_dim=noise_dim_u,
-                      attr_noise_dim=noise_dim_a,
-                      node_mu_hidden=hidden_u,
-                      node_var_hidden=hidden_u_v,
-                      attr_mu_hidden=hidden_a,
-                      attr_var_hidden=hidden_a_v,
-                      K=args.K,
-                      J=args.J,
-                      decoder_type=args.decoder_type)
-
-        # 为不同的module设置不同weight decay
-        # params_decay = []
-        # for name, param in model.named_parameters():
-        #     if 'mlp' in name and 'weight' in name:
-        #         print(name)
-        #         params_decay.append(param)
-        # optimizer = optim.Adam([
-        #     {'params': params_decay, 'weight_decay': 1e-5}
-        # ], lr=args.pretrain_lr)
+        if args.version == 'v1':
+            model = HOANE(input_dim=num_features,
+                          output_dim=z_dim,
+                          dropout=0.0,
+                          device=args.device,
+                          node_noise_dim=noise_dim_u,
+                          attr_noise_dim=noise_dim_a,
+                          node_mu_hidden=hidden_u,
+                          node_var_hidden=hidden_u_v,
+                          attr_mu_hidden=hidden_a,
+                          attr_var_hidden=hidden_a_v,
+                          K=args.K,
+                          J=args.J,
+                          encoder_type=args.encoder_type,
+                          decoder_type=args.decoder_type)
+        else:
+            assert args.version == 'v2'
+            model = HOANE_V2(input_dim=num_features,
+                             output_dim=z_dim,
+                             dropout=0.0,
+                             device=args.device,
+                             node_noise_dim=noise_dim_u,
+                             attr_noise_dim=noise_dim_a,
+                             node_mu_hidden=hidden_u,
+                             node_var_hidden=hidden_u_v,
+                             attr_mu_hidden=hidden_a,
+                             attr_var_hidden=hidden_a_v,
+                             K=args.K,
+                             J=args.J,
+                             encoder_type=args.encoder_type,
+                             decoder_type=args.decoder_type)
 
         model.to(args.device)
         optimizer = optim.Adam(params=model.parameters(), lr=args.pretrain_lr)
@@ -138,6 +125,10 @@ def main(args):
             if tolerance > 100:
                 break
             start_time = time.time()
+            # Graph augmentation
+            adj_train_aug = adj_augment(adj_mat=adj_train, aug_prob=args.aug_e)
+            fea_train_aug = attr_augment(attr_mat=fea_train, aug_prob=args.aug_a)
+            adj_norm, pos_weight, norm, features, pos_weight_a, norm_a = prepare_inputs(adj=adj_train_aug, features=fea_train_aug, args=args)
             warmup = np.min([epoch / 300., 1.])
             model.train()
             optimizer.zero_grad()
@@ -208,8 +199,8 @@ def main(args):
                     model.eval()
                     merged_node_mu, merged_node_sigma, merged_node_z_samples, node_logv_iw, node_z_samples_iw, \
                     merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
-                    reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features,
-                                                                                                             adj=adj_norm)
+                    reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features_test,
+                                                                                                             adj=adj_norm_test)  # full edges and full attrs
                 if link_prediction or attr_inference:
                     if link_prediction:
                         roc_curr_val, ap_curr_val = get_roc_score_node(emb=node_mu_iw_vec.detach().cpu().numpy(),
@@ -263,14 +254,13 @@ def main(args):
                     lr_classifier = LogisticRegression(num_dim=node_mu_iw_vec.shape[1],
                                                        num_class=classes_num(args.dataset)).to(args.device)
                     finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr,
-                                                    weight_decay=1e-4)
+                                                    weight_decay=0.0001)
                     criterion = torch.nn.CrossEntropyLoss()
-                    lr_classifier.train()
-
                     best_inner_val_acc = -1
                     best_inner_epoch = -1
                     best_inner_val_test_acc = -1
                     for f_epoch in range(args.finetune_epochs):
+                        lr_classifier.train()
                         out = lr_classifier(node_mu_iw_vec)
                         # print(out.shape)
                         loss = criterion(out[train_mask], labels[train_mask])
@@ -286,17 +276,18 @@ def main(args):
                                 val_acc = accuracy(pred[val_mask], labels[val_mask])
                                 test_acc = accuracy(pred[test_mask], labels[test_mask])
 
-                                if val_acc > best_inner_val_acc:
+                                if val_acc >= best_inner_val_acc:
                                     best_inner_val_acc = val_acc
                                     best_inner_epoch = f_epoch
                                     best_inner_val_test_acc = test_acc
                                 # print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
-                    if best_inner_val_acc > best_outer_val_acc:
+                    if best_inner_val_acc >= best_outer_val_acc:
                         best_outer_val_acc = best_inner_val_acc
                         best_outer_epoch = epoch
                         best_outer_val_test_acc = best_inner_val_test_acc
-                    print(f"Pretrain epoch {epoch} --- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
-                          f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
+                    print(
+                        f"Pretrain epoch {epoch} --- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
+                        f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
         if link_prediction or attr_inference:
             print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
             print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))

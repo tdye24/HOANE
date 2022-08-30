@@ -7,11 +7,13 @@ import torch.nn.functional as F
 import torch
 import random
 import argparse
+import scipy
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 
 def get_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--version', type=str, default='v1', help='Method version.')
     parser.add_argument('--node-classification', action='store_true', default=False, help='Do node classification.')
     parser.add_argument('--attr-inference', action='store_true', default=False, help='Do attribute inference.')
     parser.add_argument('--link-prediction', action='store_true', default=False, help='Do link prediction.')
@@ -35,9 +37,12 @@ def get_args():
     parser.add_argument('--warmup', type=float, default=0,
                         help='Warmup')
     parser.add_argument('--display-step', type=int, default=50, help='Training loss display step.')
+    parser.add_argument('--encoder-type', type=str, default='gcn', help='Encoder type (attributes).')
     parser.add_argument('--decoder-type', type=str, default='inner_product', help='Decoder type.')
     parser.add_argument('--node-loss-type', type=str, default='bce_loss', help='Node loss type.')
     parser.add_argument('--attr-loss-type', type=str, default='bce_loss', help='Attr loss type.')
+    parser.add_argument('--aug-e', type=float, default=0.0, help='Mask ratio of edges.')
+    parser.add_argument('--aug-a', type=float, default=0.0, help='Mask ratio of attributes.')
 
     args = parser.parse_args()
     args.cuda = not args.no_cuda and torch.cuda.is_available()
@@ -221,17 +226,17 @@ def mask_test_feas(features):
             continue
         else:
             false_feas_dic[(i, j)] = 1
-        if np.random.random_sample() > 0.333 :
-            if len(test_feas_false) < num_test :
+        if np.random.random_sample() > 0.333:
+            if len(test_feas_false) < num_test:
                 test_feas_false.append([i, j])
             else:
-                if len(val_feas_false) < num_val :
+                if len(val_feas_false) < num_val:
                     val_feas_false.append([i, j])
         else:
-            if len(val_feas_false) < num_val :
+            if len(val_feas_false) < num_val:
                 val_feas_false.append([i, j])
             else:
-                if len(test_feas_false) < num_test :
+                if len(test_feas_false) < num_test:
                     test_feas_false.append([i, j])
     data = np.ones(train_feas.shape[0])
     fea_train = sp.csr_matrix((data, (train_feas[:, 0], train_feas[:, 1])), shape=features.shape)
@@ -449,3 +454,63 @@ def classes_num(dataset_str):
     return {'cora': 7,
             'citeseer': 6,
             'pubmed': 3}[dataset_str]
+
+
+def adj_augment(adj_mat, aug_prob):
+    # adj_mat: scipy sparse matrix
+    # Symmetric Matrices
+
+    # change inplace
+    # copy is very important
+    # aug_prob /= 2
+    adj_mat = adj_mat.copy()
+    xrow, yrow = adj_mat.nonzero()
+    low_tri = xrow > yrow
+    xrow = xrow[low_tri]
+    yrow = yrow[low_tri]
+    num_indices = len(xrow)
+    selected_idx = random.sample(range(num_indices), int(num_indices * aug_prob))
+    selected_idx.sort()
+    xrow_ = xrow[selected_idx]
+    yrow_ = yrow[selected_idx]
+    adj_mat[xrow_, yrow_] = 0
+    adj_mat[yrow_, xrow_] = 0
+    adj_mat.eliminate_zeros()
+    return adj_mat
+
+
+def attr_augment(attr_mat, aug_prob):
+    # attr_mat: scipy dense matrix
+
+    # change inplace
+    # copy is very important
+    attr_mat = attr_mat.copy()
+    xrow, yrow = attr_mat.nonzero()
+    num_indices = len(xrow)
+    selected_idx = random.sample(range(num_indices), int(num_indices * aug_prob))
+    selected_idx.sort()
+    xrow_ = xrow[selected_idx]
+    yrow_ = yrow[selected_idx]
+    attr_mat[xrow_, yrow_] = 0
+    return attr_mat
+
+
+def prepare_inputs(adj, features, args):
+    adj_norm = preprocess_graph(adj)
+    adj_norm = scipy.sparse.coo_matrix((adj_norm[1], (adj_norm[0][:, 0], adj_norm[0][:, 1])),
+                                       shape=adj_norm[2]).toarray()
+    adj_norm = torch.FloatTensor(adj_norm)
+    adj_norm = adj_norm.to(args.device)
+    pos_weight_node = torch.tensor(float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()).to(args.device)
+    norm_node = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
+
+    features = torch.FloatTensor(np.array(features.todense()))
+    features = features.to(args.device)
+    features_nonzero = torch.where(features == 1)[0].shape[0]
+
+    pos_weight_attr = torch.tensor(
+        float(features.shape[0] * features.shape[1] - features_nonzero) / features_nonzero).to(args.device)
+    norm_attr = features.shape[0] * features.shape[1] / float(
+        (features.shape[0] * features.shape[1] - features_nonzero) * 2)
+
+    return adj_norm, pos_weight_node, norm_node, features, pos_weight_attr, norm_attr

@@ -1,4 +1,4 @@
-python v1-train.py \
+python train.py \
 --pretrain-epochs \
 200 \
 --finetune-epochs \
