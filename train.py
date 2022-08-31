@@ -109,7 +109,7 @@ def main(args):
                              decoder_type=args.decoder_type)
 
         model.to(args.device)
-        optimizer = optim.Adam(params=model.parameters(), lr=args.pretrain_lr)
+        optimizer = optim.Adam(params=model.parameters(), lr=args.pretrain_lr, weight_decay=args.pretrain_wd)
         for epoch in range(1, args.pretrain_epochs + 1):
             if args.link_prediction or args.attr_inference:
                 tol = 100

@@ -37,6 +37,8 @@ def get_args():
     parser.add_argument('--finetune-epochs', type=int, default=200, help='Number of epochs to finetune.')
     parser.add_argument('--pretrain-lr', type=float, default=0.001, help='Initial pretrain learning rate.')
     parser.add_argument('--finetune-lr', type=float, default=0.01, help='Initial finetune learning rate.')
+    parser.add_argument('--pretrain-wd', type=float, default=5e-4, help='Weight decay for pretraining.')
+    parser.add_argument('--finetune-wd', type=float, default=5e-4, help='Weight decay for finetune.')
     parser.add_argument('--finetune-interval', type=int, default=10, help='Interval between two finetune.')
     parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
     parser.add_argument('--dataset', type=str, default='cora', help='type of dataset.')
