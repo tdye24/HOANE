@@ -79,19 +79,8 @@ class GraphConvolutionK(nn.Module):
         torch.nn.init.uniform_(self.weight, a=-init_range, b=init_range)
 
     def forward(self, inputs, adj):
-        # K = inputs.shape[1]
-        # for i in range(K):
-        #     x = inputs[:, i, :].squeeze()
-        #     x = self.dropout_layer(x)
-        #     x = torch.mm(x, self.weight)
-        #     x = torch.mm(adj, x)
-        #
-        #     if i == 0:
-        #         outputs = self.act(x).unsqueeze(1)
-        #     else:
-        #         outputs = torch.cat((outputs, self.act(x).unsqueeze(1)), 1)
         support = torch.stack(
-            [torch.mm(inp, self.weight) for inp in torch.unbind(inputs, dim=1)],
+            [torch.mm(self.dropout_layer(inp), self.weight) for inp in torch.unbind(inputs, dim=1)],
             dim=1)
         outputs = torch.stack(
             [torch.spmm(adj, sup) for sup in torch.unbind(support, dim=1)],
@@ -137,6 +126,7 @@ class DenseModel(nn.Module):
         super(DenseModel, self).__init__()
         self.act = act
         self.fcs = []
+        self.dropout_layer = nn.Dropout(p=dropout)
         for i in range(len(output_dims)):
             if i == 0:
                 self.fcs.append(nn.Linear(in_features=input_dim, out_features=output_dims[0]))
@@ -146,6 +136,8 @@ class DenseModel(nn.Module):
 
     def forward(self, x):
         for i in range(len(self.fcs)):
+            # todo(tdye): DenseModel dropout
+            x = self.dropout_layer(x)
             x = self.fcs[i](x)
             x = self.act(x)
         return x
@@ -172,10 +164,45 @@ class InnerProduct_Decoder(nn.Module):
         return outputs_u, outputs_a
 
 
+class SparseDecoder(nn.Module):
+    """Decoder model layer for link prediction."""
+
+    def __init__(self, z_dim, dropout=0.):
+        super(SparseDecoder, self).__init__()
+        self.dropout = dropout
+        self.rk_u = Parameter(torch.FloatTensor(z_dim))
+        self.rk_a = Parameter(torch.FloatTensor(z_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.uniform_(self.rk_u, a=-6., b=0.)
+        torch.nn.init.uniform_(self.rk_a, a=-6., b=0.)
+
+    def forward(self, z_u, z_a):
+        rk_u = F.sigmoid(self.rk_u)
+        z_u = F.dropout(z_u, self.dropout, self.training)
+        z_u_t = z_u.transpose(0, 1)
+        z_u_t = torch.matmul(torch.diag(rk_u), z_u_t)
+        x = torch.matmul(z_u, z_u_t)
+        # outputs_u = 1 - torch.exp(- torch.exp(x))
+        outputs_u = x
+
+        rk_a = F.sigmoid(self.rk_a)
+        z_a = F.dropout(z_a, self.dropout, self.training)
+        z_a_t = z_a.transpose(0, 1)
+        z_a_t = torch.matmul(torch.diag(rk_a), z_a_t)
+        y = torch.matmul(z_u, z_a_t)
+        # outputs_a = 1 - torch.exp(- torch.exp(y))
+        outputs_a = y
+
+        return outputs_u, outputs_a
+
+
 class GraphAttentionLayer(nn.Module):
     """
     Simple GAT layer, similar to https://arxiv.org/abs/1710.10903
     """
+
     def __init__(self, in_features, out_features, dropout, alpha, concat=True):
         super(GraphAttentionLayer, self).__init__()
         self.dropout = dropout
@@ -186,16 +213,16 @@ class GraphAttentionLayer(nn.Module):
 
         self.W = nn.Parameter(torch.empty(size=(in_features, out_features)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
-        self.a = nn.Parameter(torch.empty(size=(2*out_features, 1)))
+        self.a = nn.Parameter(torch.empty(size=(2 * out_features, 1)))
         nn.init.xavier_uniform_(self.a.data, gain=1.414)
 
         self.leakyrelu = nn.LeakyReLU(self.alpha)
 
     def forward(self, h, adj):
-        Wh = torch.mm(h, self.W) # h.shape: (N, in_features), Wh.shape: (N, out_features)
+        Wh = torch.mm(h, self.W)  # h.shape: (N, in_features), Wh.shape: (N, out_features)
         e = self._prepare_attentional_mechanism_input(Wh)
 
-        zero_vec = -9e15*torch.ones_like(e)
+        zero_vec = -9e15 * torch.ones_like(e)
         attention = torch.where(adj > 0, e, zero_vec)
         attention = F.softmax(attention, dim=1)
         attention = F.dropout(attention, self.dropout, training=self.training)
@@ -245,7 +272,7 @@ class GAT(nn.Module):
                                      alpha=alpha,
                                      concat=True) for _ in range(heads)]
             )
-            for i in range(1, num_layers-1):
+            for i in range(1, num_layers - 1):
                 self.gat_layers.extend(
                     [GraphAttentionLayer(in_features=hidden_dim * heads,
                                          out_features=hidden_dim,
@@ -261,9 +288,112 @@ class GAT(nn.Module):
                                                concat=False)
 
     def forward(self, x, adj):
-        for i in range(0, self.num_layers-1):
+        for i in range(0, self.num_layers - 1):
             x = F.dropout(x, self.dropout, training=self.training)
-            x = torch.cat([att(x, adj) for att in self.gat_layers[i*self.heads: (i+1)*self.heads]], dim=1)
+            x = torch.cat([att(x, adj) for att in self.gat_layers[i * self.heads: (i + 1) * self.heads]], dim=1)
+        x = F.dropout(x, self.dropout, training=self.training)
+        return self.out_att(x, adj)
+        # x = F.elu(self.out_att(x, adj))
+        # return F.log_softmax(x, dim=1)
+
+
+class GraphAttentionLayerK(nn.Module):
+    """
+    Simple GAT layer, similar to https://arxiv.org/abs/1710.10903
+    """
+
+    def __init__(self, in_features, out_features, dropout, alpha, concat=True):
+        super(GraphAttentionLayerK, self).__init__()
+        self.dropout = dropout
+        self.in_features = in_features
+        self.out_features = out_features
+        self.alpha = alpha
+        self.concat = concat
+
+        self.W = nn.Parameter(torch.empty(size=(in_features, out_features)))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+        self.a = nn.Parameter(torch.empty(size=(2 * out_features, 1)))
+        nn.init.xavier_uniform_(self.a.data, gain=1.414)
+
+        self.leakyrelu = nn.LeakyReLU(self.alpha)
+
+    def forward(self, inputs, adj):
+        outputs = []
+        for h in torch.unbind(inputs, dim=1):
+            Wh = torch.mm(h, self.W)  # h.shape: (N, in_features), Wh.shape: (N, out_features)
+            e = self._prepare_attentional_mechanism_input(Wh)
+
+            zero_vec = -9e15 * torch.ones_like(e)
+            attention = torch.where(adj > 0, e, zero_vec)
+            attention = F.softmax(attention, dim=1)
+            attention = F.dropout(attention, self.dropout, training=self.training)
+            h_prime = torch.matmul(attention, Wh)
+
+            if self.concat:
+                outputs.append(F.elu(h_prime))
+            else:
+                outputs.append(h_prime)
+        outputs = torch.stack(outputs, dim=1)
+        return outputs
+
+    def _prepare_attentional_mechanism_input(self, Wh):
+        # Wh.shape (N, out_feature)
+        # self.a.shape (2 * out_feature, 1)
+        # Wh1&2.shape (N, 1)
+        # e.shape (N, N)
+        Wh1 = torch.matmul(Wh, self.a[:self.out_features, :])
+        Wh2 = torch.matmul(Wh, self.a[self.out_features:, :])
+        # broadcast add
+        e = Wh1 + Wh2.T
+        return self.leakyrelu(e)
+
+    def __repr__(self):
+        return self.__class__.__name__ + ' (' + str(self.in_features) + ' -> ' + str(self.out_features) + ')'
+
+
+class GATK(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers, dropout, alpha, heads):
+        """Dense version of GAT."""
+        super(GATK, self).__init__()
+        self.dropout = dropout
+        self.num_layers = num_layers
+        self.heads = heads
+        self.gatk_layers = []
+        if num_layers == 1:
+            # 一层GAT
+            self.out_att = GraphAttentionLayerK(in_features=input_dim,
+                                                out_features=output_dim,
+                                                dropout=dropout,
+                                                alpha=alpha,
+                                                concat=False)
+        else:
+            # input projection (no residual)
+            self.gatk_layers.extend(
+                [GraphAttentionLayerK(in_features=input_dim,
+                                      out_features=hidden_dim,
+                                      dropout=dropout,
+                                      alpha=alpha,
+                                      concat=True) for _ in range(heads)]
+            )
+            for i in range(1, num_layers - 1):
+                self.gatk_layers.extend(
+                    [GraphAttentionLayerK(in_features=hidden_dim * heads,
+                                          out_features=hidden_dim,
+                                          dropout=dropout,
+                                          alpha=alpha,
+                                          concat=True) for _ in range(heads)]
+                )
+            self.gat_layers = nn.ModuleList(self.gatk_layers)
+            self.out_att = GraphAttentionLayerK(in_features=hidden_dim * heads,
+                                                out_features=output_dim,
+                                                dropout=dropout,
+                                                alpha=alpha,
+                                                concat=False)
+
+    def forward(self, x, adj):
+        for i in range(0, self.num_layers - 1):
+            x = F.dropout(x, self.dropout, training=self.training)
+            x = torch.cat([att(x, adj) for att in self.gatk_layers[i * self.heads: (i + 1) * self.heads]], dim=2)
         x = F.dropout(x, self.dropout, training=self.training)
         return self.out_att(x, adj)
         # x = F.elu(self.out_att(x, adj))
@@ -277,7 +407,7 @@ class GAT_Decoder(nn.Module):
         super(GAT_Decoder, self).__init__()
         self.dropout = dropout
         self.act = act  # self.dropout_layer = nn.Dropout(p=dropout)
-        self.decoder = GAT(input_dim=256,
+        self.decoder = GAT(input_dim=1024,
                            hidden_dim=512,
                            output_dim=1433,
                            num_layers=num_layers,
@@ -315,7 +445,7 @@ class GAT_Decoder(nn.Module):
 class MLP_Decoder(nn.Module):
     """MLP decoder layer for link prediction and attribute inference."""
 
-    def __init__(self, dropout=0., act=torch.sigmoid, num_layers=1):
+    def __init__(self, dropout=0., act=torch.sigmoid):
         super(MLP_Decoder, self).__init__()
         self.dropout = dropout
         self.act = act  # self.dropout_layer = nn.Dropout(p=dropout)
@@ -356,9 +486,23 @@ class LogisticRegression(nn.Module):
         logits = self.linear(x)
         return logits
 
+
 # GAT 层数， dropout， concat
 
+
 if __name__ == '__main__':
-    model = GAT(nfeat=1433, nhid=512, nclass=7, dropout=0., alpha=0.1, nheads=4)
+    # model = GraphAttentionLayerK(in_features=1433, out_features=512, dropout=0., alpha=0.1, concat=True)
+    # x = torch.ones((2708, 3, 1433))
+    # adj = torch.ones((2708, 2708))
+    # for name, param in model.named_parameters():
+    #     print(name, param.data.shape)
+    # out = model(x, adj)
+    # print(out.shape)
+
+    model = GATK(input_dim=1433, hidden_dim=512, output_dim=512, num_layers=2, dropout=0., alpha=0.3, heads=4)
+    x = torch.ones((2708, 3, 1433))
+    adj = torch.ones((2708, 2708))
     for name, param in model.named_parameters():
         print(name, param.data.shape)
+    out = model(x, adj)
+    print(out.shape)

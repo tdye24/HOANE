@@ -1,15 +1,14 @@
 import time
 import torch
-import scipy
 import numpy as np
 import scipy.sparse as sp
 from torch import optim
+import torch.nn.functional as F
 from utils import get_args, set_random_seed, load_data_with_labels, mask_test_edges, mask_test_feas, \
     get_rec_loss, \
     get_roc_score_node, get_roc_score_attr, accuracy, classes_num, prepare_inputs
-from utils import adj_augment, attr_augment
+from utils import adj_augment, attr_augment, node_classification_evaluation, load_dataset_dgl
 from model import HOANE, HOANE_V2
-from layers import LogisticRegression
 
 # Model hyper-parameters
 noise_dim_u = 5
@@ -36,19 +35,7 @@ def main(args):
     for i, seed in enumerate(seeds):
         print(f"########## Run {i} for seed {seed} ##########")
         set_random_seed(seed=seed)
-        # Loading dataset, independent of random seed
         adj, features, labels, train_mask, val_mask, test_mask = load_data_with_labels(dataset_str=args.dataset)
-        # print(f"adj.shape = {adj.shape}")
-        # print(f"features.shape = {features.shape}")
-        # print(f"labels.shape = {labels.shape}")
-        #
-        # print("Train mask: ")
-        # print(np.where(train_mask == 1)[0].tolist())
-        # print("Val mask: ")
-        # print(np.where(val_mask == 1)[0].tolist())
-        # print("Test mask: ")
-        # print(np.where(test_mask == 1)[0].tolist())
-
         num_nodes, num_features = features.shape
 
         # Store original adjacency matrix (without diagonal entries) for later
@@ -70,7 +57,8 @@ def main(args):
             adj_train = adj
 
         # following for test, no edges or attr augmentation
-        adj_norm_test, pos_weight_test, norm_test, features_test, pos_weight_a_test, norm_a_test = prepare_inputs(adj=adj_train, features=fea_train, args=args)
+        adj_norm_test, pos_weight_test, norm_test, features_test, pos_weight_a_test, norm_a_test = prepare_inputs(
+            adj=adj_train, features=fea_train, args=args)
 
         adj_label = adj_train + sp.eye(adj_train.shape[0])  # 自环-边，计算重构loss时，需要用到节点与自己的边
         adj_label = torch.FloatTensor(adj_label.toarray()).to(args.device)
@@ -82,12 +70,16 @@ def main(args):
         best_roc_test = 0
         best_ap_test = 0
 
+        outer_best_val_acc = -1
+        outer_best_epoch = -1
+        outer_best_test_acc = -1
+
         set_random_seed(seed=seed)
 
         if args.version == 'v1':
             model = HOANE(input_dim=num_features,
                           output_dim=z_dim,
-                          dropout=0.0,
+                          dropout=args.dropout,
                           device=args.device,
                           node_noise_dim=noise_dim_u,
                           attr_noise_dim=noise_dim_a,
@@ -103,7 +95,7 @@ def main(args):
             assert args.version == 'v2'
             model = HOANE_V2(input_dim=num_features,
                              output_dim=z_dim,
-                             dropout=0.0,
+                             dropout=args.dropout,
                              device=args.device,
                              node_noise_dim=noise_dim_u,
                              attr_noise_dim=noise_dim_a,
@@ -118,21 +110,27 @@ def main(args):
 
         model.to(args.device)
         optimizer = optim.Adam(params=model.parameters(), lr=args.pretrain_lr)
-        best_outer_val_acc = -1
-        best_outer_epoch = -1
-        best_outer_val_test_acc = -1
         for epoch in range(1, args.pretrain_epochs + 1):
-            if tolerance > 100:
+            if args.link_prediction or args.attr_inference:
+                tol = 100
+            else:
+                assert args.node_classification
+                tol = 20
+            if tolerance > tol:
                 break
             start_time = time.time()
             # Graph augmentation
             adj_train_aug = adj_augment(adj_mat=adj_train, aug_prob=args.aug_e)
             fea_train_aug = attr_augment(attr_mat=fea_train, aug_prob=args.aug_a)
-            adj_norm, pos_weight, norm, features, pos_weight_a, norm_a = prepare_inputs(adj=adj_train_aug, features=fea_train_aug, args=args)
+            adj_norm, pos_weight, norm, features, pos_weight_a, norm_a = prepare_inputs(adj=adj_train_aug,
+                                                                                        features=fea_train_aug,
+                                                                                        args=args)
+            target_features = features
             warmup = np.min([epoch / 300., 1.])
             model.train()
             optimizer.zero_grad()
-
+            # todo(tdye): 特征归一化
+            # features = F.normalize(features, p=1, dim=1)  # 特征归一化
             merged_node_mu, merged_node_sigma, merged_node_z_samples, node_logv_iw, node_z_samples_iw, \
             merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
             reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features,
@@ -163,7 +161,7 @@ def main(args):
             node_log_prior_iw = torch.mean(node_log_prior_iw_vec, 0)
 
             # attr重构loss
-            features_tile = features.unsqueeze(-1).repeat(1, 1, args.K)  # feature matrix
+            features_tile = target_features.unsqueeze(-1).repeat(1, 1, args.K)  # feature matrix
             log_lik_iw_attr = -1 * get_rec_loss(norm=norm_a,
                                                 pos_weight=pos_weight_a,
                                                 pred=reconstruct_attr_logits,
@@ -199,8 +197,10 @@ def main(args):
                     model.eval()
                     merged_node_mu, merged_node_sigma, merged_node_z_samples, node_logv_iw, node_z_samples_iw, \
                     merged_attr_mu, merged_attr_sigma, merged_attr_z_samples, attr_logv_iw, attr_z_samples_iw, \
-                    reconstruct_node_logits, reconstruct_attr_logits, node_mu_iw_vec, attr_mu_iw_vec = model(x=features_test,
-                                                                                                             adj=adj_norm_test)  # full edges and full attrs
+                    node_mu_iw_vec, attr_mu_iw_vec = model.encode(
+                        # x=F.normalize(features_test, p=1, dim=1),
+                        x=features,
+                        adj=adj_norm_test)  # full edges and full attrs
                 if link_prediction or attr_inference:
                     if link_prediction:
                         roc_curr_val, ap_curr_val = get_roc_score_node(emb=node_mu_iw_vec.detach().cpu().numpy(),
@@ -251,53 +251,38 @@ def main(args):
                     # graph_mae_embedding = np.load('./embedding.npy')
                     # node_mu_iw_vec = torch.tensor(graph_mae_embedding).to(args.device)
 
-                    lr_classifier = LogisticRegression(num_dim=node_mu_iw_vec.shape[1],
-                                                       num_class=classes_num(args.dataset)).to(args.device)
-                    finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr,
-                                                    weight_decay=0.0001)
-                    criterion = torch.nn.CrossEntropyLoss()
-                    best_inner_val_acc = -1
-                    best_inner_epoch = -1
-                    best_inner_val_test_acc = -1
-                    for f_epoch in range(args.finetune_epochs):
-                        lr_classifier.train()
-                        out = lr_classifier(node_mu_iw_vec)
-                        # print(out.shape)
-                        loss = criterion(out[train_mask], labels[train_mask])
-                        finetune_optimizer.zero_grad()
-                        loss.backward()
-                        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3)
-                        finetune_optimizer.step()
-                        if f_epoch % 1 == 0:
-                            with torch.no_grad():
-                                lr_classifier.eval()
-                                pred = lr_classifier(node_mu_iw_vec)
-                                train_acc = accuracy(pred[train_mask], labels[train_mask])
-                                val_acc = accuracy(pred[val_mask], labels[val_mask])
-                                test_acc = accuracy(pred[test_mask], labels[test_mask])
-
-                                if val_acc >= best_inner_val_acc:
-                                    best_inner_val_acc = val_acc
-                                    best_inner_epoch = f_epoch
-                                    best_inner_val_test_acc = test_acc
-                                # print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
-                    if best_inner_val_acc >= best_outer_val_acc:
-                        best_outer_val_acc = best_inner_val_acc
-                        best_outer_epoch = epoch
-                        best_outer_val_test_acc = best_inner_val_test_acc
+                    final_test_acc, inner_best_val_acc, inner_best_test_acc = node_classification_evaluation(
+                        data=node_mu_iw_vec,
+                        labels=labels,
+                        train_mask=train_mask,
+                        val_mask=val_mask,
+                        test_mask=test_mask,
+                        args=args)
+                    print(f"Pretrain epoch {epoch}")
+                    # print(
+                    #     f"[Inner] --- Best ValAcc: {inner_best_val_acc:.4f}, ",
+                    #     f"Final TestAcc: {final_test_acc:.4f}, ",
+                    #     f"Best TestAcc: {inner_best_test_acc:.4f} --- ")
+                    if inner_best_val_acc >= outer_best_val_acc:
+                        tolerance = 0
+                        outer_best_val_acc = inner_best_val_acc
+                        outer_best_epoch = epoch
+                        outer_best_test_acc = inner_best_test_acc
+                    else:
+                        tolerance += 1
                     print(
-                        f"Pretrain epoch {epoch} --- Best ValAcc: {best_outer_val_acc:.4f} in epoch {best_outer_epoch}, ",
-                        f"Early-stopping-TestAcc: {best_outer_val_test_acc:.4f} --- ")
+                        f"[Outer] --- Best ValAcc: {outer_best_val_acc:.4f} in epoch {outer_best_epoch}, ",
+                        f"Best TestAcc: {outer_best_test_acc:.4f} --- ")
         if link_prediction or attr_inference:
             print("val_roc:", '{:.5f}'.format(best_roc_val), "val_ap=", "{:.5f}".format(best_ap_val))
             print("test_roc:", '{:.5f}'.format(best_roc_test), "test_ap=", "{:.5f}".format(best_ap_test))
             test_roc_over_runs.append(best_roc_test)
             test_ap_over_runs.append(best_ap_test)
         if node_classification:
-            print("Node classification, val_acc", '{:.5f}'.format(best_outer_val_acc), "test_acc",
-                  '{:.5f}'.format(best_outer_val_test_acc))
+            print("Node classification, val_acc", '{:.5f}'.format(outer_best_val_acc), "test_acc",
+                  '{:.5f}'.format(outer_best_test_acc))
 
-            test_acc_over_runs.append(best_outer_val_test_acc)
+            test_acc_over_runs.append(outer_best_test_acc)
     if link_prediction or attr_inference:
         print("Test ROC", test_roc_over_runs)
         print("Test AP", test_ap_over_runs)

@@ -8,7 +8,21 @@ import torch
 import random
 import argparse
 import scipy
+from torch import optim
+from layers import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score
+
+from dgl.data import (
+    CoraGraphDataset,
+    CiteseerGraphDataset,
+    PubmedGraphDataset
+)
+
+GRAPH_DICT = {
+    "cora": CoraGraphDataset,
+    "citeseer": CiteseerGraphDataset,
+    "pubmed": PubmedGraphDataset
+}
 
 
 def get_args():
@@ -49,6 +63,17 @@ def get_args():
     args.device = 'cuda' if args.cuda else 'cpu'
 
     return args
+
+
+def load_dataset_dgl(dataset_name):
+    assert dataset_name in GRAPH_DICT, f"Unknow dataset: {dataset_name}."
+    dataset = GRAPH_DICT[dataset_name]()
+    graph = dataset[0]
+    graph = graph.remove_self_loop()
+    graph = graph.add_self_loop()
+    num_features = graph.ndata["feat"].shape[1]
+    num_classes = dataset.num_classes
+    return graph, (num_features, num_classes)
 
 
 def load_data(dataset):
@@ -514,3 +539,36 @@ def prepare_inputs(adj, features, args):
         (features.shape[0] * features.shape[1] - features_nonzero) * 2)
 
     return adj_norm, pos_weight_node, norm_node, features, pos_weight_attr, norm_attr
+
+
+def node_classification_evaluation(data, labels, train_mask, val_mask, test_mask, args):
+    lr_classifier = LogisticRegression(num_dim=data.shape[1],
+                                       num_class=classes_num(args.dataset)).to(args.device)
+    finetune_optimizer = optim.Adam(params=lr_classifier.parameters(), lr=args.finetune_lr,
+                                    weight_decay=0.0001)
+    criterion = torch.nn.CrossEntropyLoss()
+    best_val_acc = -1
+    best_epoch = -1
+    best_val_test_acc = -1
+    for f_epoch in range(args.finetune_epochs):
+        lr_classifier.train()
+        out = lr_classifier(data)
+        # print(out.shape)
+        loss = criterion(out[train_mask], labels[train_mask])
+        finetune_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(lr_classifier.parameters(), max_norm=3)
+        finetune_optimizer.step()
+        with torch.no_grad():
+            lr_classifier.eval()
+            pred = lr_classifier(data)
+            train_acc = accuracy(pred[train_mask], labels[train_mask])
+            val_acc = accuracy(pred[val_mask], labels[val_mask])
+            test_acc = accuracy(pred[test_mask], labels[test_mask])
+
+            if val_acc >= best_val_acc:
+                best_val_acc = val_acc
+                best_epoch = f_epoch
+                best_val_test_acc = test_acc
+            # print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
+    return test_acc, best_val_acc, best_val_test_acc
