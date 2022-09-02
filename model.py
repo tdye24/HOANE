@@ -32,11 +32,11 @@ class HOANE(nn.Module):
                  dropout=0.,
                  K=1,
                  J=1,
-                 encoder_type='gcn',
-                 decoder_type='inner_product',
+                 encoder_type='gat',
+                 decoder_type='gat',
                  device="cpu",
-                 mask_rate=0.5,
-                 replace_rate=0.05):
+                 mask_rate=0.00,
+                 replace_rate=0.00):
         super(HOANE, self).__init__()
         self.num_nodes = num_nodes
         self.input_dim = input_dim
@@ -119,7 +119,7 @@ class HOANE(nn.Module):
             self.decoder = MLP_Decoder(act=lambda x: x)
         else:
             assert decoder_type == 'gat'
-            self.decoder = GAT_Decoder(num_layers=1, act=lambda x: x)
+            self.decoder = GAT_Decoder(num_layers=2, act=lambda x: x)
 
         self.reset_parameters()
 
@@ -133,7 +133,7 @@ class HOANE(nn.Module):
                     assert 'bias' in name
                     torch.nn.init.zeros_(param)
 
-    def encoding_mask_noise(self, x, mask_rate=0.3):
+    def encoding_mask_noise(self, x, mask_rate=0.0):
         num_nodes = x.shape[0]
         perm = torch.randperm(num_nodes, device=x.device)
         num_mask_nodes = int(mask_rate * num_nodes)

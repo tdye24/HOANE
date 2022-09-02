@@ -5,6 +5,7 @@ import numpy as np
 import scipy.sparse as sp
 import torch.nn.functional as F
 import torch
+import torch.nn as nn
 import random
 import argparse
 import scipy
@@ -33,12 +34,12 @@ def get_args():
     parser.add_argument('--link-prediction', action='store_true', default=False, help='Do link prediction.')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='Disables CUDA training.')
     parser.add_argument('--seeds', type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], help='Random seed.')
-    parser.add_argument('--pretrain-epochs', type=int, default=100, help='Number of epochs to pretrain.')
-    parser.add_argument('--finetune-epochs', type=int, default=200, help='Number of epochs to finetune.')
+    parser.add_argument('--pretrain-epochs', type=int, default=500, help='Number of epochs to pretrain.')
+    parser.add_argument('--finetune-epochs', type=int, default=500, help='Number of epochs to finetune.')
     parser.add_argument('--pretrain-lr', type=float, default=0.001, help='Initial pretrain learning rate.')
     parser.add_argument('--finetune-lr', type=float, default=0.01, help='Initial finetune learning rate.')
-    parser.add_argument('--pretrain-wd', type=float, default=5e-4, help='Weight decay for pretraining.')
-    parser.add_argument('--finetune-wd', type=float, default=5e-4, help='Weight decay for finetune.')
+    parser.add_argument('--pretrain-wd', type=float, default=0, help='Weight decay for pretraining.')
+    parser.add_argument('--finetune-wd', type=float, default=0, help='Weight decay for finetune.')
     parser.add_argument('--finetune-interval', type=int, default=10, help='Interval between two finetune.')
     parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
     parser.add_argument('--dataset', type=str, default='cora', help='type of dataset.')
@@ -53,10 +54,10 @@ def get_args():
     parser.add_argument('--warmup', type=float, default=0,
                         help='Warmup')
     parser.add_argument('--display-step', type=int, default=50, help='Training loss display step.')
-    parser.add_argument('--encoder-type', type=str, default='gcn', help='Encoder type (attributes).')
-    parser.add_argument('--decoder-type', type=str, default='inner_product', help='Decoder type.')
+    parser.add_argument('--encoder-type', type=str, default='gat', help='Encoder type (attributes).')
+    parser.add_argument('--decoder-type', type=str, default='gat', help='Decoder type.')
     parser.add_argument('--node-loss-type', type=str, default='bce_loss', help='Node loss type.')
-    parser.add_argument('--attr-loss-type', type=str, default='bce_loss', help='Attr loss type.')
+    parser.add_argument('--attr-loss-type', type=str, default='mse_loss', help='Attr loss type.')
     parser.add_argument('--aug-e', type=float, default=0.0, help='Mask ratio of edges.')
     parser.add_argument('--aug-a', type=float, default=0.0, help='Mask ratio of attributes.')
 
@@ -574,3 +575,18 @@ def node_classification_evaluation(data, labels, train_mask, val_mask, test_mask
                 best_val_test_acc = test_acc
             # print("f_epoch", f_epoch, "train acc", train_acc, "val acc", val_acc, "test acc", test_acc)
     return test_acc, best_val_acc, best_val_test_acc
+
+
+def create_activation(name):
+    if name == "relu":
+        return nn.ReLU()
+    elif name == "gelu":
+        return nn.GELU()
+    elif name == "prelu":
+        return nn.PReLU()
+    elif name is None:
+        return nn.Identity()
+    elif name == "elu":
+        return nn.ELU()
+    else:
+        raise NotImplementedError(f"{name} is not implemented.")
